@@ -2,6 +2,7 @@
  * Railway MCP Tools
  *
  * Provides tools for managing Railway services in the IGLA project.
+ * Multi-account support with automatic header selection based on token kind.
  *
  * Anchor: phi^2 + phi^-2 = 3
  */
@@ -49,37 +50,164 @@ interface ExperienceAppendParams {
 }
 
 /**
- * GraphQL client for Railway API
+ * Account configuration loaded from environment
  */
-class RailwayClient {
-  private token: string;
-  private endpoint = "https://backboard.railway.app/graphql/v2";
+interface Account {
+  token: string;
+  projectId: string;
+  environmentId: string;
+  kind: "project" | "personal";  // project = PAT (Project-Access-Token), personal = Bearer
+  label: string;  // "acc0", "acc1", etc.
+}
 
-  constructor(token?: string) {
-    this.token = token || process.env.RAILWAY_TOKEN || "";
-    if (!this.token) {
-      throw new Error("RAILWAY_TOKEN is required");
+/**
+ * Load all accounts from environment variables RAILWAY_TOKEN_ACC*, RAILWAY_PROJECT_ID_ACC*, etc.
+ */
+function loadAccounts(): Account[] {
+  const accounts: Account[] = [];
+  const maxAccounts = 7;  // ACC0-ACC6
+
+  for (let i = 0; i < maxAccounts; i++) {
+    const token = process.env[`RAILWAY_TOKEN_ACC${i}`];
+    const projectId = process.env[`RAILWAY_PROJECT_ID_ACC${i}`];
+    const environmentId = process.env[`RAILWAY_ENVIRONMENT_ID_ACC${i}`] || "";
+    const kindStr = process.env[`RAILWAY_TOKEN_KIND_ACC${i}`] || "project";
+    const kind = (kindStr === "personal" || kindStr === "user" || kindStr === "account") ? "personal" : "project";
+
+    if (!token || !projectId) {
+      if (token || projectId) {
+        console.warn(`[WARN] ACC${i} incomplete: missing ${!token ? "token" : "projectId"}`);
+      }
+      continue;
+    }
+
+    accounts.push({
+      token,
+      projectId,
+      environmentId,
+      kind,
+      label: `acc${i}`,
+    });
+  }
+
+  if (accounts.length === 0) {
+    throw new Error("No valid accounts found in RAILWAY_TOKEN_ACC* env vars");
+  }
+
+  console.log(`[INFO] Loaded ${accounts.length} accounts: ${accounts.map(a => `${a.label}(${a.kind})`).join(", ")}`);
+  return accounts;
+}
+
+/**
+ * Load allowed project IDs from ALLOWED_PROJECT_IDS env var
+ */
+function loadAllowedProjectIds(): Set<string> {
+  const allowed = process.env.ALLOWED_PROJECT_IDS || "";
+  const ids = allowed.split(",").map(s => s.trim()).filter(s => s.length > 0);
+  const set = new Set(ids);
+
+  console.log(`[INFO] Allowed project IDs: ${ids.length} projects${ids.length > 0 ? ` (${ids[0]}...)` : ""}`);
+  if (ids.length === 0) {
+    console.warn("[WARN] ALLOWED_PROJECT_IDS is empty - all projects allowed!");
+  } else {
+    // Validate that each allowed project has a matching account
+    const allProjectIds = ACCOUNTS.map(a => a.projectId);
+    for (const id of ids) {
+      if (!allProjectIds.includes(id)) {
+        console.warn(`[WARN] Project ${id} in ALLOWED_PROJECT_IDS has no matching RAILWAY_TOKEN_ACC*`);
+      }
     }
   }
 
+  return set;
+}
+
+// Load accounts and whitelist at module initialization
+const ACCOUNTS = loadAccounts();
+const ALLOWED_PROJECT_IDS = loadAllowedProjectIds();
+
+/**
+ * GraphQL client for Railway API with multi-account support
+ */
+class RailwayClient {
+  private account: Account;
+  private endpoint = "https://backboard.railway.app/graphql/v2";
+
+  constructor(account: Account) {
+    this.account = account;
+  }
+
+  /**
+   * Find account by project ID
+   * @throws Error if project not in whitelist or no account found
+   */
+  static findByProjectId(projectId: string): RailwayClient {
+    // Check whitelist first
+    if (ALLOWED_PROJECT_IDS.size > 0 && !ALLOWED_PROJECT_IDS.has(projectId)) {
+      const available = Array.from(ALLOWED_PROJECT_IDS).slice(0, 3).join(", ");
+      throw new Error(`Project ID ${projectId} not in ALLOWED_PROJECT_IDS whitelist. Allowed projects start with: ${available}...`);
+    }
+
+    // Find account that has this project
+    const account = ACCOUNTS.find(a => a.projectId === projectId);
+    if (!account) {
+      const available = ACCOUNTS.map(a => a.projectId.slice(0, 8) + "...").join(", ");
+      throw new Error(`No account found for project ${projectId}. Available projects: ${available}`);
+    }
+
+    return new RailwayClient(account);
+  }
+
+  /**
+   * Find account by label (acc0, acc1, etc.)
+   */
+  static findByLabel(label: string): RailwayClient | null {
+    const account = ACCOUNTS.find(a => a.label === label);
+    return account ? new RailwayClient(account) : null;
+  }
+
+  /**
+   * Get all accounts
+   */
+  static getAllAccounts(): Account[] {
+    return [...ACCOUNTS];
+  }
+
+  /**
+   * Execute GraphQL query with appropriate header based on token kind
+   */
   async query<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
+    // Choose header based on token kind
+    let headerName: string;
+    let headerValue: string;
+
+    if (this.account.kind === "personal") {
+      // Personal/Account token: Authorization: Bearer <token>
+      headerName = "Authorization";
+      headerValue = `Bearer ${this.account.token}`;
+    } else {
+      // Project token (PAT): Project-Access-Token: <token>
+      headerName = "Project-Access-Token";
+      headerValue = this.account.token;
+    }
+
     const response = await fetch(this.endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${this.token}`,
+        [headerName]: headerValue,
       },
       body: JSON.stringify({ query, variables }),
     });
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Railway API error: ${response.status} ${text}`);
+      throw new Error(`Railway API error: ${response.status} ${text} (account: ${this.account.label}, header: ${headerName})`);
     }
 
     const data = await response.json() as { data?: T; errors?: unknown[] };
     if (data.errors && data.errors.length > 0) {
-      throw new Error(`Railway GraphQL error: ${JSON.stringify(data.errors)}`);
+      throw new Error(`Railway GraphQL error: ${JSON.stringify(data.errors)} (account: ${this.account.label})`);
     }
 
     if (!data.data) {
@@ -178,14 +306,26 @@ class RailwayClient {
   }
 
   tokenFingerprint(): string {
-    // Simple hash of the token for logging
     let hash = 0;
-    for (let i = 0; i < this.token.length; i++) {
-      const char = this.token.charCodeAt(i);
+    for (let i = 0; i < this.account.token.length; i++) {
+      const char = this.account.token.charCodeAt(i);
       hash = ((hash << 5) - hash) + char;
       hash = hash & hash;
     }
     return Math.abs(hash).toString(16);
+  }
+
+  /**
+   * Get account info for debugging
+   */
+  getAccountInfo() {
+    return {
+      label: this.account.label,
+      projectId: this.account.projectId,
+      environmentId: this.account.environmentId,
+      kind: this.account.kind,
+      tokenHash: this.tokenFingerprint(),
+    };
   }
 }
 
@@ -193,15 +333,81 @@ class RailwayClient {
  * Register all Railway MCP tools on the server
  */
 export function registerRailwayTools(server: McpServer): void {
+  // Tool: fleet_health - check all accounts
+  server.tool(
+    "fleet_health",
+    "Check health of all Railway accounts in the fleet. Returns status, token kind, and project info for each account.",
+    {},
+    async () => {
+      const results = [];
+
+      for (const account of ACCOUNTS) {
+        try {
+          const client = new RailwayClient(account);
+          const pv = await client.projectView(account.projectId);
+
+          results.push({
+            acc: account.label,
+            user_email_hash: account.token.slice(0, 6) + "***",
+            project_id: account.projectId,
+            project_name: pv.name,
+            token_kind: account.kind,
+            token_header_used: account.kind === "personal" ? "Authorization: Bearer" : "Project-Access-Token",
+            services_count: pv.services.edges.length,
+            last_seen: new Date().toISOString(),
+            status: "OK",
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          results.push({
+            acc: account.label,
+            user_email_hash: account.token.slice(0, 6) + "***",
+            project_id: account.projectId,
+            token_kind: account.kind,
+            status: "ERROR",
+            error: message,
+          });
+        }
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
+      };
+    }
+  );
+
+  // Tool: fleet_status - quick cached status (non-blocking)
+  server.tool(
+    "fleet_status",
+    "Quick status of all accounts (cached, no API calls). Returns account labels and project IDs.",
+    {},
+    async () => {
+      const status = ACCOUNTS.map(a => ({
+        acc: a.label,
+        project_id: a.projectId,
+        token_kind: a.kind,
+        environment_id: a.environmentId || "not-set",
+      }));
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          accounts_count: ACCOUNTS.length,
+          allowed_projects_count: ALLOWED_PROJECT_IDS.size,
+          accounts: status,
+        }, null, 2) }],
+      };
+    }
+  );
+
   // Tool: railway_service_list
   server.tool(
     "railway_service_list",
-    "List all Railway services in the IGLA project (or any other project).",
+    "List all Railway services in a project. Automatically selects the correct account based on project ID and checks whitelist.",
     {},
     async (args: any) => {
       try {
-        const client = new RailwayClient();
         const project = (args.project as string) || IGLA_PROJECT_ID;
+        const client = RailwayClient.findByProjectId(project);
         const pv = await client.projectView(project);
 
         const services = pv.services.edges.map((edge: any) => ({
@@ -215,6 +421,7 @@ export function registerRailwayTools(server: McpServer): void {
           project_name: pv.name,
           services,
           count: services.length,
+          account: client.getAccountInfo(),
         };
 
         return {
@@ -233,13 +440,10 @@ export function registerRailwayTools(server: McpServer): void {
   // Tool: railway_service_deploy
   server.tool(
     "railway_service_deploy",
-    "Create (or reuse) a Railway service, pin its image, upsert env vars, and trigger a redeploy. Emits an L7 experience line. Requires RAILWAY_TOKEN env var.",
+    "Create (or reuse) a Railway service, pin its image, upsert env vars, and trigger a redeploy. Automatically selects account based on project ID.",
     {},
     async (args: any) => {
       try {
-        const client = new RailwayClient();
-        const tokenFp = client.tokenFingerprint();
-
         const project = (args.project as string) || IGLA_PROJECT_ID;
         const environment = (args.environment as string) || IGLA_PROD_ENV_ID;
         const image = (args.image as string) || "ghcr.io/ghashtag/trios-trainer-igla:latest";
@@ -251,6 +455,9 @@ export function registerRailwayTools(server: McpServer): void {
             isError: true,
           };
         }
+
+        const client = RailwayClient.findByProjectId(project);
+        const tokenFp = client.tokenFingerprint();
 
         let serviceId: string;
         if (args.existing_service_id) {
@@ -270,7 +477,6 @@ export function registerRailwayTools(server: McpServer): void {
 
         const deployId = await client.serviceRedeploy(serviceId, environment);
 
-        // R7 triplet (simplified - in real implementation would write to .trinity/experience/)
         const triplet = `RAIL=deploy project=${project.slice(0, 8)} service=${serviceId.slice(0, 8)} token=${tokenFp}`;
 
         const body = {
@@ -278,6 +484,7 @@ export function registerRailwayTools(server: McpServer): void {
           deploy_id: deployId.id,
           image,
           triplet,
+          account: client.getAccountInfo(),
         };
 
         return {
@@ -296,11 +503,11 @@ export function registerRailwayTools(server: McpServer): void {
   // Tool: railway_service_redeploy
   server.tool(
     "railway_service_redeploy",
-    "Trigger a redeploy on an existing Railway service.",
+    "Trigger a redeploy on an existing Railway service. Automatically selects account based on project ID.",
     {},
     async (args: any) => {
       try {
-        const client = new RailwayClient();
+        const project = (args.project as string) || IGLA_PROJECT_ID;
         const env = (args.environment as string) || IGLA_PROD_ENV_ID;
         const service = args.service as string;
 
@@ -311,11 +518,13 @@ export function registerRailwayTools(server: McpServer): void {
           };
         }
 
+        const client = RailwayClient.findByProjectId(project);
         const deployId = await client.serviceRedeploy(service, env);
 
         const body = {
           service_id: service,
           deploy_id: deployId.id,
+          account: client.getAccountInfo(),
         };
 
         return {
@@ -347,6 +556,7 @@ export function registerRailwayTools(server: McpServer): void {
       }
 
       try {
+        const project = (args.project as string) || IGLA_PROJECT_ID;
         const service = args.service as string;
 
         if (!service) {
@@ -356,11 +566,12 @@ export function registerRailwayTools(server: McpServer): void {
           };
         }
 
-        const client = new RailwayClient();
+        const client = RailwayClient.findByProjectId(project);
         await client.serviceDelete(service);
 
         const body = {
           deleted_service_id: service,
+          account: client.getAccountInfo(),
         };
 
         return {
@@ -384,9 +595,15 @@ export function registerRailwayTools(server: McpServer): void {
     async (args: any) => {
       try {
         const project = (args.project as string) || IGLA_PROJECT_ID;
-        const tokenFp = process.env.RAILWAY_TOKEN
-          ? Array.from(process.env.RAILWAY_TOKEN).reduce((acc, char) => ((acc << 5) - acc + char.charCodeAt(0)) | 0, 0).toString(16)
-          : "no-token";
+
+        // Find account for this project
+        let tokenFp = "no-token";
+        try {
+          const client = RailwayClient.findByProjectId(project);
+          tokenFp = client.tokenFingerprint();
+        } catch {
+          // If no account found, use empty hash
+        }
 
         const verb = (args.verb as string) || "experience";
         const triplet = `RAIL=${verb} project=${project.slice(0, 8)} service=${((args.service as string) || "none").slice(0, 8)} token=${tokenFp}`;
@@ -395,12 +612,9 @@ export function registerRailwayTools(server: McpServer): void {
         const soul = (args.soul_name as string) || "RailRangerOne";
         const status = (args.status as string) || "OK";
 
-        // Format: [timestamp] AGENT: agent | SOUL: soul | ISSUE: #N | STEP: phi_step | TASK: task | STATUS: status | TRIPLET: triplet
         const timestamp = new Date().toISOString();
         const line = `[${timestamp}] AGENT: ${agent} | SOUL: ${soul} | ISSUE: ${args.issue} | STEP: ${args.phi_step} | TASK: ${args.task} | STATUS: ${status} | TRIPLET: ${triplet}`;
 
-        // In a real implementation, this would write to .trinity/experience/<YYYYMMDD>.trinity
-        // For now, just return the formatted line
         const body = {
           line,
           triplet,
@@ -479,4 +693,4 @@ WHERE r.run_at = (
   );
 }
 
-export const TOOL_COUNT = 6;
+export const TOOL_COUNT = 8;  // Added fleet_health and fleet_status
