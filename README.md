@@ -6,7 +6,7 @@ Public MCP server for managing Railway services in the IGLA project.
 
 ## Features
 
-- **Streamable HTTP MCP Server**: Exposes 6 tools via `/mcp` endpoint
+- **Streamable HTTP MCP Server**: Exposes 8 tools via `/mcp` endpoint
 - **Railway Service Management**: List, deploy, redeploy, and delete services
 - **Experience Logging**: Append to `.trinity/experience/` logs
 - **Audit Support**: Get Neon DDL for railway audit tables
@@ -47,6 +47,8 @@ The server will start on `http://localhost:3000` by default.
 
 | Tool | Description |
 |------|-------------|
+| `fleet_health` | Check health of all Railway accounts in the fleet (live API call per account) |
+| `fleet_status` | Quick cached status of all accounts (no API calls) |
 | `railway_service_list` | List all Railway services in a project |
 | `railway_service_deploy` | Create or reuse a service, set image, env vars, and redeploy |
 | `railway_service_redeploy` | Trigger a redeploy on an existing service |
@@ -116,6 +118,9 @@ npm run build
 
 # Run in development mode
 npm run dev
+
+# Run tests
+npm test
 ```
 
 ## License
@@ -124,7 +129,7 @@ Apache-2.0
 
 ## Repository
 
-[github.com/gHashTag/trios-railway](https://github.com/gHashTag/trios-railway)
+[github.com/gHashTag/trios-railway-mcp](https://github.com/gHashTag/trios-railway-mcp)
 
 ## Related Projects
 

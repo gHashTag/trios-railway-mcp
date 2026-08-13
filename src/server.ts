@@ -13,7 +13,7 @@
 import type { Express, Request, Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { registerRailwayTools } from "./tools.js";
+import { registerRailwayTools, TOOL_NAMES } from "./tools.js";
 
 interface InternalAuth {
   username: string;
@@ -107,12 +107,5 @@ export function mountMcpHttpHandler(
  * Get the list of tool names for logging
  */
 export function getToolNames(): string[] {
-  return [
-    "railway_service_list",
-    "railway_service_deploy",
-    "railway_service_redeploy",
-    "railway_service_delete",
-    "railway_experience_append",
-    "railway_audit_migrate_sql",
-  ];
+  return [...TOOL_NAMES];
 }
