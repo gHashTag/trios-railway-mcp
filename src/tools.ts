@@ -330,6 +330,25 @@ class RailwayClient {
 }
 
 /**
+ * Canonical list of every tool registered by registerRailwayTools(), in
+ * registration order.
+ *
+ * This is the single source of truth for the tool list advertised by the
+ * `/` and `/health` endpoints. Adding a tool below without adding it here
+ * is caught by test/tool-names.test.js.
+ */
+export const TOOL_NAMES = [
+  "fleet_health",
+  "fleet_status",
+  "railway_service_list",
+  "railway_service_deploy",
+  "railway_service_redeploy",
+  "railway_service_delete",
+  "railway_experience_append",
+  "railway_audit_migrate_sql",
+] as const;
+
+/**
  * Register all Railway MCP tools on the server
  */
 export function registerRailwayTools(server: McpServer): void {
@@ -693,4 +712,4 @@ WHERE r.run_at = (
   );
 }
 
-export const TOOL_COUNT = 8;  // Added fleet_health and fleet_status
+export const TOOL_COUNT = TOOL_NAMES.length;

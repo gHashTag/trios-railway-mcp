@@ -13,7 +13,7 @@
     "dev": "tsc && node dist/index.js",
     "prepublishOnly": "npm run build",
     "lint": "echo \"TODO: eslint\" && exit 0",
-    "test": "echo \"Tests: todo\" && exit 0"
+    "test": "npm run build && node --test \"test/*.test.js\""
   },
   "keywords": [
     "mcp",
